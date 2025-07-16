@@ -2,15 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"strconv"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 func main() {
 	n := maelstrom.NewNode()
-	hist := []int{}
+	hist := make(map[int]bool)
 	cur_topology := make(map[string][]string)
+	var lock sync.Mutex
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
 		// Unmarshal the message body as an loosely-typed map.
@@ -21,21 +25,66 @@ func main() {
 
 		num_float, _ := body["message"].(float64)
 		num := int(num_float)
-		hist = append(hist, num)
-		// Update the message type to return back.
+		lock.Lock()
+		hist[num] = true
+		lock.Unlock()
 
 		for _, neighbor := range cur_topology[n.ID()] {
-			forward := map[string]any{
-				"type":    "broadcast",
-				"message": num,
+			gossip := map[string]any{
+				"type":    "gossip",
+				"message": float64(num),
+				"TTL":     float64(5),
 			}
-			n.Send(neighbor, forward)
+
+			n.Send(neighbor, gossip)
 		}
 
 		body["type"] = "broadcast_ok"
 		delete(body, "message")
 		// Echo the original message back with the updated message type.
 		return n.Reply(msg, body)
+	})
+
+	n.Handle("gossip", func(msg maelstrom.Message) error {
+		// Unmarshal the message body as an loosely-typed map.
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		num_float, _ := body["message"].(float64)
+		num := int(num_float)
+		lock.Lock()
+		hist[num] = true
+		lock.Unlock()
+
+		var ttl int
+		switch v := body["TTL"].(type) {
+		case float64:
+			ttl = int(v)
+		case string:
+			parsed, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			ttl = parsed
+		default:
+			return fmt.Errorf("wrong TTL type: %T", v)
+		}
+
+		ttl -= 1
+		if ttl != 0 {
+			for _, neighbor := range cur_topology[n.ID()] {
+				gossip := map[string]any{
+					"type":    "gossip",
+					"message": float64(num),
+					"TTL":     float64(ttl),
+				}
+
+				n.Send(neighbor, gossip)
+			}
+		}
+		return nil
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
@@ -48,7 +97,13 @@ func main() {
 		// Update the message type to return back.
 		body["type"] = "read_ok"
 
-		body["messages"] = hist
+		lock.Lock()
+		arr := make([]int, 0, len(hist))
+		for k := range hist {
+			arr = append(arr, k)
+		}
+		lock.Unlock()
+		body["messages"] = arr
 
 		// Echo the original message back with the updated message type.
 		return n.Reply(msg, body)
