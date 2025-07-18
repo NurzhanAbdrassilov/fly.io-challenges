@@ -2,9 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
-	"strconv"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -27,13 +25,16 @@ func main() {
 		num := int(num_float)
 		lock.Lock()
 		hist[num] = true
+		arr := make([]int, 0, len(hist))
+		for k := range hist {
+			arr = append(arr, k)
+		}
 		lock.Unlock()
 
 		for _, neighbor := range cur_topology[n.ID()] {
 			gossip := map[string]any{
 				"type":    "gossip",
-				"message": float64(num),
-				"TTL":     float64(5),
+				"message": arr,
 			}
 
 			n.Send(neighbor, gossip)
@@ -52,37 +53,29 @@ func main() {
 			return err
 		}
 
-		num_float, _ := body["message"].(float64)
-		num := int(num_float)
+		arr_any := body["message"].([]any)
+		var unseen []int
 		lock.Lock()
-		hist[num] = true
+		for _, v := range arr_any {
+			num := int(v.(float64))
+			if hist[num] == false {
+				unseen = append(unseen, num)
+				hist[num] = true
+			}
+		}
 		lock.Unlock()
 
-		var ttl int
-		switch v := body["TTL"].(type) {
-		case float64:
-			ttl = int(v)
-		case string:
-			parsed, err := strconv.Atoi(v)
-			if err != nil {
-				return err
-			}
-			ttl = parsed
-		default:
-			return fmt.Errorf("wrong TTL type: %T", v)
+		if len(unseen) == 0 {
+			return nil
 		}
 
-		ttl -= 1
-		if ttl != 0 {
-			for _, neighbor := range cur_topology[n.ID()] {
-				gossip := map[string]any{
-					"type":    "gossip",
-					"message": float64(num),
-					"TTL":     float64(ttl),
-				}
-
-				n.Send(neighbor, gossip)
+		for _, neighbor := range cur_topology[n.ID()] {
+			gossip := map[string]any{
+				"type":    "gossip",
+				"message": unseen,
 			}
+
+			n.Send(neighbor, gossip)
 		}
 		return nil
 	})
